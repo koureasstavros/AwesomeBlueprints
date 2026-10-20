@@ -52,6 +52,9 @@ sources or references.
 
 - Add only missing fields whose meaning and encoding are confirmed by the references.
 - Do not synthesize opaque Garmin streams by copying, repeating or scaling reference messages.
+- Keep these instructions reusable: do not name specific activity files or include values observed
+   in original files, including timing, scores, identifiers or per-activity results. Put file-specific
+   evidence and estimates in the delivery report; retain only general formulas and FIT encodings here.
 - Account-level data such as sleep, stress, recovery history, nutrition intake and fluid intake is
   not activity telemetry. Leave it unavailable unless explicitly supplied.
 - Label estimates, assumptions and unavailable values separately. Heart rate is usually the least
@@ -93,6 +96,7 @@ sources or references.
 | Running Dynamics | Cadence, stride, vertical ratio/oscillation, ground contact | standard record/lap/session fields | Estimate if missing |
 | Training Effect | Aerobic/Anaerobic | session training-effect fields plus Garmin capability/device-identity envelope | Estimate; UI-confirmed with reference device identity |
 | Training Effect | Primary Benefit, Exercise Load | benefit candidates plus session `training_load_peak` (168); UI may derive values from private physiology streams | Estimate; device-family specific |
+| Performance Condition | Score/chart | event 21 code 39 (`data = 100 + initial score`); signed record 20 field 90 over time | Estimate; FIT validated, Connect view untested |
 | Stamina | Start/end/min/chart | confirmed private record/session fields | Estimate; device-family specific |
 | Body Battery | Net impact/chart | confirmed private record/session fields | Estimate; start is assumed unless supplied |
 | Impact Load | Load/actual distance | confirmed private record/lap/session fields | Estimate; low confidence |
@@ -136,6 +140,32 @@ Target HR is the reference steady HR plus speed, grade and post-20-minute drift 
 first-order response and pause-recovery constants from references when possible. Never adjust HR to
 force a desired Training Effect.
 
+### Performance Condition
+
+In compatible Garmin watch references, event 21 code 39 with `event_type = marker` coincides with
+the first valid value of a signed 8-bit series in record 20 field 90. The observed event `data`
+equals 100 plus that first score. Derive onset from the supplied references rather than assuming
+a fixed time for every activity.
+Field 90 is an undocumented native record field in these files, not a named public FIT field; the
+encoding is supported by reference observations and independent FIT community analysis, not by the
+public Garmin profile.
+
+The Performance Condition graph is the affected Garmin Connect view. When estimating a missing
+series, keep existing scores and events untouched; otherwise add one marker at the estimated onset
+and one field-90 value per subsequent record. Encode earlier records with FIT-invalid `sint8` (127),
+not a valid zero score. The marker `data` must equal `100 +` the first valid field-90 value and share
+its timestamp. Preserve all existing record fields and their raw values.
+
+For a missing series, use a smoothed reference score trajectory relative to its onset score and a
+bounded change in target speed/HR efficiency from onset. A 300-sample rolling median can reduce
+noise when records are approximately one second apart; account for actual timestamps and pauses.
+Do not treat a fitted coefficient, neutral starting score, or clamp as a universal Garmin formula:
+calibrate to suitable references, and disclose assumptions when the available data is insufficient.
+This is a low-confidence modeled trend, especially when target heart rate is already estimated;
+it is not a watch measurement or a Garmin/Firstbeat calculation. Validate FIT integrity and data
+preservation, then report Garmin Connect import and graph visibility as untested until observed.
+Do not infer that this marker or chart data enables Intensity Minutes.
+
 ### Calories
 
 Calibrate `kcal = k * total_work_kJ` from reference session totals. Do not conflate active calories
@@ -144,6 +174,16 @@ with resting or total calories.
 ## Aggregates
 
 - Build distance laps only when target laps are absent/invalid. Last lap may be partial.
+- When target laps lack `lap.intensity` (field 23, enum), set it on every lap to the value the
+  references consistently use (Garmin watch auto-laps use `interval` = 5). Add it as a new enum
+  field without altering other lap fields. It labels lap type only and does not enable Intensity
+  Minutes.
+- Fill standard fields the references populate when the target lacks them, derived only from target
+  records: lap `event`/`event_type` (lap/stop), start/end positions, `total_ascent`/`total_descent`,
+  `total_cycles` (strides) and `enhanced_min/max_altitude`; session `event`/`event_type`
+  (session/stop), `nec`/`swc` bounding box and `enhanced_avg/min/max_altitude`; record
+  `activity_type` (running); event `event_group` (0). Lap ascent, descent and strides must sum
+  exactly to the preserved session totals. Never invent `file_id.number` or other identifiers.
 - Preserve target session timer, elapsed time, distance, ascent and descent.
 - Aggregate HR, power, cadence, dynamics, altitude, work, calories and strides from records.
 - Normalized power: fourth root of the mean fourth power of 30-second rolling power.
@@ -167,14 +207,11 @@ Training Effect, Primary Benefit and Exercise Load visible. The confirmed envelo
 `device_info` (23) messages.
 
 Do not infer that the serial alone is the trigger because it was tested together with the capability
-envelope. In the full private-stream diagnostic, Garmin Connect displayed Threshold (High Aerobic),
-aerobic 5.0, anaerobic 2.4 and Exercise Load 357 even though session summaries requested 1.5, 0.3
-and 22. This proves that recognized Garmin files may derive or override displayed values from private
-physiology streams. The later all-original-families diagnostic, which combined those streams with the
-complete profile/configuration envelope, changed the displayed primary benefit from the previous
-high-aerobic/Overreaching result to Low Aerobic. Therefore the classification is derived from the
-interaction of private streams and profile/configuration data; copying every family does not preserve
-or reliably control it. For controlled summary values, start from the clean target-preserving 312/313
+envelope. In diagnostics, Garmin Connect displayed values different from the requested session
+summaries and changed the primary benefit when additional profile/configuration data was included.
+Recognized Garmin files may derive or override displayed values from private physiology streams;
+copying every family does not preserve or reliably control the classification. For controlled
+summary values, start from the clean target-preserving 312/313
 variant, add the confirmed identity/capability envelope, and exclude uncalibrated streams
 140/160/233/325/326/327/534.
 
@@ -201,9 +238,10 @@ The section also remained hidden after adding the same real Garmin device/capabi
 unlocked Training Effect, followed by `user_profile` (3), `zones_target` (7), proprietary
 physiology/profile message 545, and the remaining configuration families 2/13/22/79/141/394.
 This complete activity-level configuration envelope still did not render Moderate, Vigorous or Total.
-A final diagnostic added standard monitoring message 55 with field 33
-`moderate_activity_minutes = 0` and field 34 `vigorous_activity_minutes = 2`; Garmin Connect imported
-the activity but still suppressed the Intensity Minutes section. Neither genuine reference activity contains message 55, although Garmin Connect shows Intensity
+A final diagnostic added standard monitoring message 55 with fields 33
+`moderate_activity_minutes` and 34 `vigorous_activity_minutes`; Garmin Connect imported
+the activity but still suppressed the Intensity Minutes section. The supplied reference activities
+did not contain message 55, although Garmin Connect shows Intensity
 Minutes for those activities when they arrive through watch synchronization. This distinction proves
 the UI values are associated during the watch sync from companion monitoring/account data rather than
 stored in the exported activity FIT itself. Treat Intensity Minutes as report-only for manual activity
@@ -244,14 +282,14 @@ low confidence.
 | Impact Load private fields | Imported in isolation |
 | Message 216 time in zone | Imported, but did not display Intensity Minutes |
 | Message 216 plus real identity/capabilities, profile 3, zones 7, physiology 545 and configuration 2/13/22/79/141/394 | Imported, but Intensity Minutes remained absent; activity FIT cannot supply this account/daily aggregate |
-| Standard monitoring message 55 fields 33/34 embedded in activity | Imported with 0 moderate and 2 vigorous minutes, but the Intensity Minutes section remained absent |
+| Standard monitoring message 55 fields 33/34 embedded in activity | Imported, but the Intensity Minutes section remained absent |
 | Message 312 target-derived splits | Imported; alone did not display Run/Walk Detection |
 | Message 313 exact-schema split summaries | Imported and made Run/Walk Detection/Run Time visible when paired with target-derived 312 messages |
 | Message 140 exact-schema activity summary | Imported in isolation, but did not display Training Effect |
 | Garmin `file_id` identity plus messages 12/23/49 | Imported and made Training Effect, Primary Benefit and Exercise Load visible when combined with the full physiology diagnostic |
 | Target-scaled streams 140/160/233/325/326/327/534 and companions without recognized identity | Imported, but Training Effect remained hidden |
-| Same private streams with recognized Garmin identity/capability envelope | Training Effect rendered, but private data overrode requested 1.5/0.3/22 with 5.0/2.4/357 and a high-aerobic/Overreaching classification |
-| All original families with full streams, identity and complete profile/configuration envelope | Imported; Training Effect changed to Low Aerobic, proving the copied profile/configuration affects Garmin's derivation; Intensity Minutes still remained absent |
+| Same private streams with recognized Garmin identity/capability envelope | Training Effect rendered, but private data overrode requested summaries and classification |
+| All reference message families with full streams, identity and complete profile/configuration envelope | Imported; Training Effect classification changed, showing that profile/configuration affects Garmin's derivation; Intensity Minutes still remained absent |
 | Whole reference-schema rebuild | Imported, but resampling damaged route/distance fidelity and requested sections remained missing |
 
 For this target/device family, build message 312 from timer-event-derived run/pause/whole-activity
